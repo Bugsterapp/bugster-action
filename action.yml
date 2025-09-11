@@ -1,0 +1,157 @@
+name: "Bugster.dev"
+description: "Send deployment notifications to Bugster Cloud"
+author: "your-org"
+branding:
+  icon: "code"
+  color: "blue"
+
+inputs:
+  bugster_api_key:
+    description: "API key for Bugster Cloud"
+    required: true
+  environment_url:
+    description: "URL of the deployed environment (e.g. https://app.example.com)"
+    required: true
+  organization_id:
+    description: "Bugster organization ID"
+    required: true
+  project_id:
+    description: "Bugster project ID"
+    required: true
+  deployment_state:
+    description: "Deployment state: in_progress | success | cancelled | failed | error (defaults to success if invalid)"
+    required: false
+    default: "success"
+  commit_sha:
+    description: "Commit SHA (if missing, will use GITHUB_SHA)"
+    required: false
+  branch:
+    description: "Branch name (if missing, will use GITHUB_REF_NAME)"
+    required: false
+  api_base_url:
+    description: "Base URL for the Bugster API (for testing)"
+    required: false
+    default: "https://api.bugster.app"
+  timeout_seconds:
+    description: "Request timeout in seconds"
+    required: false
+    default: "60"
+
+outputs:
+  status:
+    description: "HTTP status code returned by the API"
+    value: ${{ steps.call.outputs.status }}
+  response:
+    description: "Response body returned by the API (truncated)"
+    value: ${{ steps.call.outputs.response }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        for bin in curl jq; do
+          command -v "$bin" >/dev/null 2>&1 || { echo "::error::$bin is required"; exit 1; }
+        done
+
+    - name: Prepare and validate inputs
+      id: prep
+      shell: bash
+      env:
+        IN_DEPLOYMENT_STATE: ${{ inputs.deployment_state }}
+        IN_COMMIT: ${{ inputs.commit_sha }}
+        IN_BRANCH: ${{ inputs.branch }}
+      run: |
+        set -euo pipefail
+
+        # 1) Normalize deployment_state
+        valid_states="in_progress success cancelled failed error"
+        dep_state="${IN_DEPLOYMENT_STATE:-success}"
+        if ! grep -qw -- "$dep_state" <<<"$valid_states"; then
+          dep_state="success"
+        fi
+
+        # 2) Commit/branch: use defaults from GitHub context if missing
+        commit="${IN_COMMIT:-${GITHUB_SHA:-}}"
+        branch="${IN_BRANCH:-${GITHUB_REF_NAME:-}}"
+
+        if [[ -z "${commit}" && -z "${branch}" ]]; then
+          echo "::error::At least one of commit_sha or branch is required."
+          exit 1
+        fi
+
+        {
+          echo "DEP_STATE=${dep_state}"
+          echo "OUT_COMMIT=${commit}"
+          echo "OUT_BRANCH=${branch}"
+        } >> "$GITHUB_ENV"
+
+    - name: Build payload
+      id: payload
+      shell: bash
+      env:
+        ENV_URL: ${{ inputs.environment_url }}
+        ORG_ID: ${{ inputs.organization_id }}
+        PROJ_ID: ${{ inputs.project_id }}
+      run: |
+        set -euo pipefail
+        payload="$(
+          jq -n \
+            --arg dep_state  "${DEP_STATE}" \
+            --arg env_url    "${ENV_URL}" \
+            --arg org_id     "${ORG_ID}" \
+            --arg proj_id    "${PROJ_ID}" \
+            --arg commit     "${OUT_COMMIT:-}" \
+            --arg branch     "${OUT_BRANCH:-}" \
+            '
+            {
+              deployment_state: $dep_state,
+              commit_sha: ( ($commit | length)  > 0 ? $commit : null ),
+              branch:     ( ($branch | length)  > 0 ? $branch : null ),
+              environment: "production",
+              environment_url: $env_url,
+              organization_id: $org_id,
+              project_id: $proj_id
+            }
+            '
+        )"
+
+        echo "$payload" > payload.json
+        echo "json=$(jq -c '.' payload.json)" >> "$GITHUB_OUTPUT"
+
+    - name: POST to Bugster Cloud
+      id: call
+      shell: bash
+      env:
+        BUGSTER_API_KEY: ${{ inputs.bugster_api_key }}
+        API_BASE_URL: ${{ inputs.api_base_url }}
+        TIMEOUT: ${{ inputs.timeout_seconds }}
+      run: |
+        set -euo pipefail
+        test -n "${BUGSTER_API_KEY:-}" || { echo "::error::bugster_api_key is required"; exit 1; }
+
+        url="${API_BASE_URL%/}/webhooks/integrations/custom"
+
+        body_file="$(mktemp)"
+        http_code="$(
+          curl -sS -X POST "$url" \
+            -H "X-API-Key: ${BUGSTER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: bugster-action (github-actions)" \
+            --data-binary @payload.json \
+            --max-time "${TIMEOUT:-60}" \
+            -w "%{http_code}" -o "$body_file"
+        )"
+
+        echo "status=${http_code}" >> "$GITHUB_OUTPUT"
+        body_trunc=$(head -c 8192 "$body_file" | tr -d '\0')
+        echo "response<<'EOF'" >> "$GITHUB_OUTPUT"
+        echo "$body_trunc" >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
+
+        case "$http_code" in
+          2*) echo "Bugster API request OK ($http_code)";;
+          *)  echo "::error::Bugster API returned HTTP $http_code. Body:"; sed -e 's/^/  /' "$body_file"; exit 1;;
+        esac

@@ -66,4 +66,3 @@ This will send a deployment notification to Bugster Cloud with the current commi
     environment_url: "https://preview.example.com"
     deployment_state: "in_progress"
 ```
-# bugster-action
