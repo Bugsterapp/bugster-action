@@ -108,8 +108,8 @@ runs:
             '
             {
               deployment_state: $dep_state,
-              commit_sha: ( ($commit | length)  > 0 ? $commit : null ),
-              branch:     ( ($branch | length)  > 0 ? $branch : null ),
+              commit_sha: ( if ($commit | length) > 0 then $commit else null end ),
+              branch:     ( if ($branch | length) > 0 then $branch else null end ),
               environment: "production",
               environment_url: $env_url,
               organization_id: $org_id,
