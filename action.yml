@@ -145,12 +145,15 @@ runs:
             -w "%{http_code}" -o "$body_file"
         )"
 
-        # Outputs — usar delimitador único sin comillas
+        # Outputs — usar delimitador único y asegurar newline antes del cierre
         delim="BUGSTER_$(date +%s%N)"
-        echo "status=${http_code}" >> "$GITHUB_OUTPUT"
-        echo "response<<$delim" >> "$GITHUB_OUTPUT"
-        head -c 8192 "$body_file" | tr -d '\0' >> "$GITHUB_OUTPUT"
-        echo "$delim" >> "$GITHUB_OUTPUT"
+        {
+          echo "status=${http_code}"
+          echo "response<<$delim"
+          head -c 8192 "$body_file" | tr -d '\0'
+          printf '\n'
+          echo "$delim"
+        } >> "$GITHUB_OUTPUT"
 
         case "$http_code" in
           2*) echo "Bugster API request OK ($http_code)";;
