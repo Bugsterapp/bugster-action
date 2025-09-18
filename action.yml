@@ -74,8 +74,19 @@ runs:
         fi
 
         # 2) Commit/branch: use defaults from GitHub context if missing
-        commit="${IN_COMMIT:-${GITHUB_SHA:-}}"
-        branch="${IN_BRANCH:-${GITHUB_REF_NAME:-}}"
+        # For PRs, use the head commit; for pushes, use GITHUB_SHA
+        if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+          # In PR context, get the actual commit from the PR head
+          pr_head_sha="$(jq -r '.pull_request.head.sha // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null || echo "")"
+          commit="${IN_COMMIT:-${pr_head_sha:-${GITHUB_SHA:-}}}"
+          # For PR branch, use the head ref name
+          pr_head_ref="$(jq -r '.pull_request.head.ref // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null || echo "")"
+          branch="${IN_BRANCH:-${pr_head_ref:-${GITHUB_REF_NAME:-}}}"
+        else
+          # For push events and others, use standard context
+          commit="${IN_COMMIT:-${GITHUB_SHA:-}}"
+          branch="${IN_BRANCH:-${GITHUB_REF_NAME:-}}"
+        fi
 
         if [[ -z "${commit}" && -z "${branch}" ]]; then
           echo "::error::At least one of commit_sha or branch is required."
